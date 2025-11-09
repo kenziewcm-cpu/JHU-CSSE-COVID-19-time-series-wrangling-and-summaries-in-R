@@ -1,0 +1,472 @@
+---
+title: "jhucovid19_code"
+format: html
+editor: visual
+---
+## COVID-19: Tidy the time series (tidyr + dplyr)
+
+Use the two JHU CSVs (confirmed + deaths). Work at the country/region level.
+
+```{r globalsetup,warning=FALSE,message=FALSE}
+library(dplyr)
+library(gt)
+library(ggplot2)
+library(tidyr)
+library(gtsummary)
+library(arsenal)
+library(lubridate)
+library(stringr)
+library(zoo)
+library(scales)
+library(countrycode)
+
+covidconfirm <-read.csv("/Users/apple/Desktop/me/WCM/semester/fall1/datasci1/week3/class6/homework2/JHU-COVID/time_series_covid19_confirmed_global.csv")
+coviddeath <-read.csv("/Users/apple/Desktop/me/WCM/semester/fall1/datasci1/week3/class6/homework2/JHU-COVID/time_series_covid19_deaths_global.csv")
+#head(covidconfirm)
+```
+
+### Import & reshape
+
+##### Pivot both wide time series to long over date columns. Convert date columns (strings) to Date. Standardize country names (trim spaces; treat "Korea, South" vs "South Korea").
+
+```{r Q1aconfirm }
+############################# confirm ####################################
+#Pivot both wide time series to long over date columns.
+covidconfirm_long <- covidconfirm %>%
+  pivot_longer(
+    cols = starts_with("X"),             #choose cols
+    names_to = "date",                   #name col to store the date
+    values_to = "number_confirmed"       #name col to store the values
+  ) 
+head(covidconfirm_long)
+
+#Convert date columns (strings) to Date.
+#remove X at the start
+covidconfirm_clean<-covidconfirm_long %>% 
+  mutate(date = stringr::str_remove(date, "^X")) %>%
+  #separate y\m\d into different cols
+  #create new cols
+  separate(date, into = c("mm","dd","yy"), sep = "\\.", #need \\ to use .
+           #convert into numeric
+           convert = TRUE, extra = "merge") %>%
+  mutate(year = 2000 + yy,
+         date = make_date(year, mm, dd))%>%
+
+  
+  # select the cols
+  select(Province.State, Country.Region, Lat, Long, date, number_confirmed) %>%
+#Standardize country names (trim spaces; treat “Korea, South” vs “South Korea” if present).
+  #change the name
+  mutate(
+    Country_Region = str_trim(Country.Region),  #remove space
+    #modify country colname
+    Country_Region = case_when(
+      Country_Region %in% c("Korea, South", "South Korea") ~ "South Korea",
+      Country_Region %in% c("Korea, North", "North Korea") ~ "North Korea",
+      TRUE ~ Country_Region
+    )
+  ) %>%
+  select(-Country.Region)
+#covidconfirm_clean
+```
+
+```{r Q1adeath }
+############################# death ####################################
+
+coviddeath_long <- coviddeath %>%
+  pivot_longer(
+    cols = starts_with("X"),             #choose cols
+    names_to = "date",                   #name col to store the date
+    values_to = "number_death"       #name col to store the values
+  ) 
+
+#remove X at the start
+covideath_clean<-coviddeath_long %>% 
+  mutate(date = stringr::str_remove(date, "^X")) %>%
+  #separate y\m\d into different cols
+  #create new cols
+  separate(date, into = c("mm","dd","yy"), sep = "\\.", #need \\ to use .
+           #convert into numeric
+           convert = TRUE, extra = "merge") %>%
+  mutate(year = 2000 + yy,
+         date = make_date(year, mm, dd))%>%
+
+  
+  # select tghe cols
+  select(Province.State, Country.Region, Lat, Long, date, number_death) %>%
+  #change the name
+  mutate(
+    Country_Region = str_trim(Country.Region),  #remove space
+    #modify country colname
+    Country_Region = case_when(
+      Country_Region %in% c("Korea, South", "South Korea") ~ "South Korea",
+      Country_Region %in% c("Korea, North", "North Korea") ~ "North Korea",
+      TRUE ~ Country_Region
+    )
+  ) %>%
+  select(-Country.Region)
+#covideath_clean
+```
+
+### Aggregate
+##### Aggregate to country-date (sum across provinces). Verify no double-counting
+
+```{r Q1b ,warning=FALSE,message=FALSE}
+############################# confirm ################################
+#Aggregate to country-date (sum across provinces). Verify no double-counting.
+#aggregate
+covid_confirm_country_date <- covidconfirm_clean %>%
+  group_by(Country_Region, date) %>%  #group by country and region
+  summarise(
+    total_confirmed = sum(number_confirmed, na.rm = TRUE),  #sum
+    province_count = n()  #This number is for further validation
+  ) %>%
+  ungroup()
+
+#filter(covid_confirm_country_date,Country_Region=="China")
+############################# death ####################################
+covid_death_country_date <- covideath_clean %>%
+  group_by(Country_Region, date) %>%  #group by country and region
+  summarise(
+    total_death = sum(number_death, na.rm = TRUE),  #sum
+    province_count = n()  #This number is for further validation
+  ) %>%
+  ungroup()
+```
+
+### Daily increments 
+
+##### Compute new cases and new deaths by countries Replace small negative blips with NA (data rectifications)
+
+```{r increments }
+############################# confirm ################################
+covid_confirm_country_date_new <- covid_confirm_country_date %>%
+  arrange(Country_Region, date) %>%
+  group_by(Country_Region) %>%
+  mutate(
+    new_confirmed = total_confirmed - lag(total_confirmed),  # daily increment
+    new_confirmed = ifelse(new_confirmed < 0, NA, new_confirmed) # replace negatives with NA
+  ) %>%
+  ungroup()
+#covid_confirm_country_date_new
+#head(filter(covid_confirm_country_date_new,Country_Region=="China"))
+############################# death ################################
+covid_death_country_date_new <-  covid_death_country_date %>%
+  arrange(Country_Region, date) %>%
+  group_by(Country_Region) %>%
+  mutate(
+    new_death = total_death - lag(total_death),  # daily increment
+    new_death = ifelse(new_death < 0, NA, new_death) # replace negatives with NA
+  ) %>%
+  ungroup()
+
+```
+
+### 7-day average
+
+#####Compute 7-day average new cases and new death
+
+```{r Q1_d, warning=FALSE}
+#Compute 7-day average new cases and new death
+############################# confirm ################################
+covid_confirm_country_date_avg <- covid_confirm_country_date_new %>%
+  group_by(Country_Region) %>%
+  arrange(date) %>%
+  mutate(
+    new_confirmed_7day = rollmean(new_confirmed, k = 7, fill = NA, align = "right")#7 days
+  ) %>%
+  ungroup()
+#head(filter(covid_death_country_date_avg,Country_Region=="China"),15)
+
+############################# death ################################
+covid_death_country_date_avg <- covid_death_country_date_new %>%
+  group_by(Country_Region) %>%
+  arrange(date) %>%
+  mutate(
+    new_death_7day = rollmean(new_death, k = 7, fill = NA, align = "right")
+  ) %>%
+  ungroup()
+covid_confirm_country_date_avg
+```
+
+### Peaks
+
+##### For each country, find the top 2 peaks (dates and values) separately for new cases and new deaths, using the variables names: new_cases_ma7 and new_deaths_ma7 . 
+
+Return a table showing the top 10 countries ranked by maximum incidence. Pick two countries from the top-10 list and plot new_cases_ma7 over time (lines, diferent colors, labeled legend, sensible date breaks).
+
+```{r Q1_e, warning=FALSE}
+#name new variables
+covid_confirm_country_date_avg <- covid_confirm_country_date_avg %>%
+  rename(new_cases_ma7 = new_confirmed_7day)
+covid_death_country_date_avg <- covid_death_country_date_avg %>%
+  rename(new_deaths_ma7 = new_death_7day)
+
+covid_country_date <- covid_confirm_country_date_avg %>%
+  left_join(
+    covid_death_country_date_avg %>%
+      select(Country_Region, date, new_deaths_ma7),
+    by = c("Country_Region", "date")
+  )
+#top2 peaks of the incidence of each country
+peaks_cases <- covid_country_date %>%
+  group_by(Country_Region) %>%
+  arrange(desc(new_cases_ma7)) %>%
+  slice_head(n = 2) %>%
+  mutate(type = "cases")
+
+#top2 peaks of the death cases of each country
+peaks_deaths <- covid_country_date %>%
+  group_by(Country_Region) %>%
+  arrange(desc(new_deaths_ma7)) %>%
+  slice_head(n = 2) %>%
+  mutate(type = "deaths")
+
+#bind
+peaks_all <- bind_rows(peaks_cases, peaks_deaths) %>%
+  ungroup()
+
+top10_countries <- covid_country_date %>%
+  group_by(Country_Region) %>%
+  summarise(max_incidence = max(new_cases_ma7, na.rm = TRUE)) %>%
+  arrange(desc(max_incidence)) %>%
+  slice_head(n = 10)
+
+#top10_countries
+
+
+plot_data <- covid_country_date %>%
+  filter(Country_Region %in% c("Japan", "Russia"))
+
+ggplot(plot_data, aes(x = date, y = new_cases_ma7, color = Country_Region)) +
+  geom_line(size = 1) +
+  labs(
+    title = "7-day COVID-19 Average Incidence of Two Countries ",
+    x = "Date",
+    y = "New Cases (7-day average)",
+    color = "Country"
+  ) +
+  theme_minimal()
+
+
+```
+
+Japan and Russia show very different epidemic patterns over time. Russia experienced earlier and more frequent peaks in 2020--2021, with a large surge in late 2021, followed by a sharp decline. Japan, by contrast, had relatively low incidence until mid-2022, when it saw very large and prolonged waves, peaking much higher than Russia. This suggests that the timing and scale of COVID-19 waves varied substantially between the two countries, likely reflecting differences in outbreak timing, interventions, and variant spread.
+
+## COVID-19: Summary tables (gtsummary)
+
+Pick a snapshot date. Create continent labels with countrycode.
+
+### gtsummary Table 1
+
+##### Build a summary table using tbl_summary stratified by continent for new_cases_ma7 and new_deaths_ma7 (continuous) and a high-incidence flag (categorical).
+
+The high-incidence is defined as above overall qunatile level 0.75. (Hint: use countrycode package to extract continent) 
+
+Use type = "continuous2" for two-line stats (mean (SD) + median \[IQR\]); add overall counts, p-values, and clearly labeled units.
+
+```{r Q2_a, warning=FALSE}
+#choose a date
+coviddate<-as.Date("2021-01-06")
+covid_data<-covid_country_date %>%
+  filter(date ==coviddate)
+# use countrycode package to extract continent
+covid_data_code<-covid_data%>%
+  mutate(
+    continent=countrycode(sourcevar=Country_Region,
+                            origin="country.name",
+                            destination="continent")
+  )
+
+q75<-quantile(covid_data_code$new_cases_ma7, 0.75, na.rm = TRUE)
+#above overall quantile level 0.75.
+covid_snapshot<-covid_data_code%>%
+  mutate(
+    high_incidence=ifelse(new_cases_ma7>q75,"High","Low/Medium")
+  )
+
+library(gtsummary)
+#summary(covid_snapshot)
+ex1 <-covid_snapshot %>%
+  dplyr::select(continent, new_cases_ma7, new_deaths_ma7, high_incidence) %>%
+  tbl_summary(by =continent)
+
+ex2<-covid_snapshot%>%
+  dplyr::select(continent, new_cases_ma7, new_deaths_ma7, high_incidence) %>%
+  tbl_summary(
+    by=continent,
+    type=list(new_cases_ma7~"continuous2",new_deaths_ma7~"continuous2"),
+    statistic=list(
+      all_continuous() ~ c("{mean} ({sd})",
+                           "{median} [{p25}, {p75}]"),
+      all_categorical() ~ "{n} / {N} ({p}%)"
+    ),
+    label=list(
+      new_cases_ma7~"New Cases",
+      new_deaths_ma7~"New Deaths",
+      high_incidence ~ "High Incidence"
+    ),
+    digits = list(all_continuous() ~ 1  )
+    
+  )  %>%
+  add_overall() %>%
+  add_p() %>%
+  modify_caption("**COVID-19 Snapshot on 2021-01-06 by Continent**")
+
+
+#packageVersion("gtsummary")
+
+#ex2
+
+
+```
+
+### Efect sizes
+
+Add a difference column comparing Europe vs Americas using add_difference. For continuous variables, set 2 significant figures, for categorical variables, set 1 decimal. (Hint: use style_sigfig and style_percent ).
+
+Hint: Pay attention to NAs. Ensure the by column (here continent) has exactly two levels afer filtering. Use droplevels() (or forcats::fct_drop ) to remove lefover factor level
+
+```{r Q2_b, warning=FALSE,message=FALSE,error=FALSE}
+
+#Europe vs Americas
+ex3 <- covid_snapshot %>%
+  filter(continent %in% c("Europe", "Americas")) %>%
+  droplevels() %>%
+  select(continent, new_cases_ma7, new_deaths_ma7, high_incidence) %>%
+  
+  tbl_summary(
+    by = continent,
+    type = list(
+      new_cases_ma7 ~ "continuous2",
+      new_deaths_ma7 ~ "continuous2"
+    ),
+    statistic = list(
+      all_continuous() ~ c("{mean} ({sd})", "{median} [{p25}, {p75}]"),
+      all_categorical() ~ "{n} / {N} ({p}%)"
+    ),
+    label = list(
+      new_cases_ma7 ~ "New Cases (7-day avg)",
+      new_deaths_ma7 ~ "New Deaths (7-day avg)",
+      high_incidence ~ "High Incidence"
+    ),
+    missing = "no"
+  ) %>%
+  
+  #difference(Europe vs Americas)
+  add_difference(
+    test = list(
+      all_continuous() ~ "t.test",
+      all_categorical() ~ "chisq.test"
+    ),
+    estimate_fun = list(
+      all_continuous()  ~ function(x) style_sigfig(x, digits = 2),
+      all_categorical() ~ function(x) style_percent(x, digits = 1)
+    )
+  ) %>%
+  
+  modify_caption("**COVID-19 Europe vs Americas: Effect Sizes**")
+
+ex3
+
+
+
+
+```
+
+##Join with OWID metadata: per-capita analysis and plot
+
+### From OWID, keep: iso_code\`, location (country), continent, and population. Remove duplicates. Show glimpse() of these 4 columns.
+
+```{r Q3_a, warning=FALSE}
+#read csv
+owid_covid_url <- "https://raw.githubusercontent.com/owid/covid-19-data/master/public/data/owid-covid-data.csv"
+owid_covid <- read.csv(owid_covid_url, stringsAsFactors = FALSE, check.names = FALSE)
+
+owid_covid_clean<-owid_covid%>%
+  select(iso_code, location, continent,population)%>%
+  distinct()             #remove duplicates
+glimpse(owid_covid_clean)
+```
+
+### Check unmatched countries the tidy JHU dataset has country names. 
+Use anti_join() both ways to find unmatched names between JHU and OWID. Show the first 5 rows of each. Write 1 bullet. Hint: use anti_join
+
+```{r Q3_b, warning=FALSE}
+jhu_not_in_owid <- covid_country_date %>%
+  anti_join(owid_covid_clean,  c("Country_Region" = "location"))
+#different col names need c()
+owid_not_in_jhu <- owid_covid_clean %>%
+  anti_join(covid_country_date, by = c( "location"="Country_Region"))
+
+head(jhu_not_in_owid, 5)
+head(owid_not_in_jhu, 5)
+
+
+```
+
+The unmatched country names are mainly due to naming differences.For example, "Burma" (JHU) vs "Myanmar" (OWID), "Cabo Verde" (JHU) vs "Cape Verde" (OWID), "Congo (Brazzaville)" (JHU) vs "Republic of Congo" (OWID), and "Congo (Kinshasa)" (JHU) vs "Democratic Republic of Congo" (OWID).
+
+c.  Join + compute per-capita rates (8 pts) lef_join() JHU tidy data with OWID metadata. Compute: cases_per100k : cumulative confirmed cases per 100,000 population. new_cases_ma7_per100k : 7-day average of new cases per 100,000 population. Show the first 3 rows (country, date, population, confirmed, new_cases_ma7_per100k ).
+
+```{r Q3_c, warning=FALSE}
+summary(owid_covid_clean)
+covid_joined<-covid_country_date %>%
+  left_join(owid_covid_clean,by =c("Country_Region"="location")) %>%
+  mutate(
+    cases_per100k=total_confirmed/population*100000,
+    new_cases_ma7_per100k=new_cases_ma7/population*100000
+  )
+
+covid_joined_show<-select(covid_joined,Country_Region, date, population, total_confirmed, new_cases_ma7_per100k)
+
+#summary(covid_joined)
+head(covid_joined_show, 3)
+
+#summary(covid_joined$date)
+#summary(covid_snapshot$date)
+```
+
+### Snapshot ranking
+
+Pick snapshot_date \<- as.Date("2021-01-15") . Find the top 15 countries by new_cases_ma7_per100k . - Show that 15-row table (country, continent, population, new_cases_ma7_per100k rounded to 1 decimal).
+
+```{r Q3_d, warning=FALSE}
+str(covid_joined$date)
+unique(head(covid_joined$date, 10))#validate the same date type
+
+
+snapshot_date <- as.Date("2021-01-15")
+
+top15_snapshot <- covid_joined %>%
+  filter(date == snapshot_date) %>%
+  arrange(desc(new_cases_ma7_per100k)) %>%
+  select(Country_Region, continent, population, new_cases_ma7_per100k) %>%
+  # rounded to 1 decimal
+  mutate(new_cases_ma7_per100k = round(new_cases_ma7_per100k, 1)) %>%
+  slice_head(n = 15)
+
+top15_snapshot
+
+```
+
+### Plot 
+
+Bar chart of these top 15 countries sorted descending by new_cases_ma7_per100k . Rotate x-axis labels for readability; subtitle should include the date
+
+```{r Q3_e, warning=FALSE}
+
+g<-ggplot(top15_snapshot,aes(x=reorder(Country_Region,new_cases_ma7_per100k), y =new_cases_ma7_per100k)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +   #Rotate x-axis labels
+  labs(
+    title = "Top 15 Countries by COVID-19 Incidence",
+    #subtitle should include the date.
+    subtitle = paste("Snapshot date:", snapshot_date),
+    x = "Country",
+    y = "New Cases"
+  ) +
+  theme_minimal()
+g
+
+```
